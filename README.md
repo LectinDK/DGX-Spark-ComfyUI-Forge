@@ -47,8 +47,18 @@ each workaround.
   first start.
 - Granular volume mounts (`/models`, `/output`, `/input`, `/user`,
   `/custom-nodes`, `/data`) instead of one shared workspace.
-- Idempotent custom-node dependency installation (skips already-
-  installed nodes on restart; auto-invalidates on image rebuild).
+- ComfyUI runs through an isolated, persistent package venv's own
+  Python interpreter, so both this project's dependency install loop
+  *and* ComfyUI-Manager's live pip installs land in the same
+  persistent location and survive container recreation.
+- ComfyUI-Manager comes bundled via ComfyUI's own
+  `manager_requirements.txt` (its version simply tracks whatever
+  `COMFYUI_REF` ships) rather than a separate pinned git clone.
+- Idempotent custom-node dependency installation, tracked with markers
+  stored *inside* the isolated package venv rather than next to each
+  node — so the markers and the venv can never drift out of sync, even
+  across a manual venv reset (skips already-installed nodes on
+  restart; auto-invalidates on image rebuild or venv recreation).
 - `preflight-check.sh` — catches Bash syntax errors, corrupted patch
   files, invalid `docker-compose.yml`, and Dockerfile lint issues
   *before* a 30–90 minute build starts.
@@ -58,9 +68,11 @@ each workaround.
 - NVIDIA DGX Spark (or other sm_121 / Blackwell GB10 hardware)
 - Docker with the NVIDIA Container Toolkit configured (comes
   preinstalled on DGX OS)
-- An existing ComfyUI models folder (`checkpoints/`, `vae/`, `loras/`,
-  etc.) — this repo mounts your models, it doesn't manage downloading
-  them
+- A models folder using ComfyUI's expected directory structure
+  (`checkpoints/`, `vae/`, `loras/`, etc.) — this can be any folder on
+  your system, it doesn't have to come from an existing ComfyUI
+  installation, as long as it follows that structure. This repo mounts
+  it, it doesn't manage downloading models.
 
 ## Quick Start
 
@@ -79,6 +91,28 @@ sha256sum patches/*.patch > patches.sha256   # baseline for integrity check
 
 ComfyUI will be reachable at `http://<host>:8190` (or whatever port you
 set in `.env`).
+
+### One-time Manager setup
+
+ComfyUI-Manager ships with a conservative default that blocks
+node/model installation from its web UI whenever ComfyUI is reachable
+over the network (i.e. bound to `0.0.0.0`, as this setup always is) —
+by design, since an installer reachable from your whole LAN is a
+larger attack surface than one reachable only from `localhost`. To
+allow installing custom nodes through the Manager UI, edit the
+Manager's own config file (generated on first start, lives in your
+persistent `/user` mount, **not** in this repo) and set:
+
+```ini
+[default]
+network_mode = personal_cloud
+```
+
+Then restart ComfyUI (the Manager's own "Restart" button is enough, no
+container recreate needed). If your DGX Spark is exposed beyond a
+trusted home/LAN network, weigh this against your own threat model
+first — `personal_cloud` mode relaxes several install-related
+security checks network-wide, not just for you.
 
 ## Configuration
 
@@ -104,8 +138,8 @@ has a sensible default and rarely needs changing.
 anything installed live via ComfyUI-Manager) but does **not** re-read
 `.env`/`docker-compose.yml` changes. `--force-recreate` always builds a
 fresh container — that's why custom-node dependencies are tracked with
-a persistent `.deps_installed` marker in `/custom-nodes`, not inside
-the container itself.
+a persistent marker directory inside `/data`, not inside the container
+itself.
 
 ## Design decisions
 
@@ -123,6 +157,49 @@ other layer, the actual installed commit is *not* "whatever is newest
 right now" — it's whatever was current the last time this layer was
 rebuilt. Check `/opt/sageattention.commit` inside a running container
 to see exactly which commit is in use.
+</details>
+
+<details>
+<summary><strong>Why is ComfyUI-Manager installed via pip instead of a pinned git clone?</strong></summary>
+
+Earlier versions of this project cloned `ComfyUI-Manager` directly
+into `custom_nodes`, the traditional installation method most
+ComfyUI Docker recipes still use. As of ComfyUI-Manager V4.0, upstream
+changed the recommended installation method to a pip package
+(`manager_requirements.txt`, shipped inside the ComfyUI repo itself)
+plus a `--enable-manager` launch flag, and its docs now explicitly
+warn against the old `git clone`-into-`custom_nodes` approach.
+Our pinned `COMFYUI_REF` is recent enough to already ship
+`manager_requirements.txt`, so we install through that instead — one
+less thing to pin separately, and it avoids running two competing
+Manager installs side by side.
+</details>
+
+<details>
+<summary><strong>Why does ComfyUI launch through the venv's own Python interpreter?</strong></summary>
+
+Earlier iterations launched ComfyUI via the base image's system
+`python3`, with `PYTHONPATH` manually pointed at the isolated venv's
+`site-packages` so custom-node dependencies were still importable.
+This mostly worked for *running* ComfyUI, but broke ComfyUI-Manager's
+own live "Install" button in two ways: pip/uv installs target
+`sys.executable` by default, so Manager's installs landed in the
+base image's system Python — which lives in the container's writable
+layer and is **wiped on every `--force-recreate`**, silently undoing
+any node installed through the UI. Worse, recent Debian/Ubuntu Python
+installs are "externally managed" (PEP 668), and `uv`/`pip` flatly
+refuse to install anything into the system interpreter outside of an
+actual virtual environment - so Manager's live installs failed outright
+with an `externally managed environment` error, not just a
+persistence problem.
+
+Launching through `$PKG_VENV/bin/python3` instead fixes both: since
+the venv was created with `--system-site-packages`, it still sees the
+base image's already-patched torch/xformers/etc., but pip/uv now see
+an actual active venv as the install target - PEP 668 no longer
+applies, and both this project's own dependency-install loop *and*
+Manager's live installs land in the same persistent `/data/pkgvenv`,
+surviving `--force-recreate`.
 </details>
 
 <details>
@@ -152,7 +229,25 @@ An isolated venv (`/data/pkgvenv`) sidesteps both: it's a small,
 mostly-empty namespace with almost nothing to conflict with, so
 resolution is fast and correct, and both `pip install` calls (our
 startup loop and ComfyUI-Manager's live installs) use the exact same
-Python interpreter and target location.
+Python interpreter and target location - see the design decision above
+on why ComfyUI is launched through this venv's interpreter directly.
+
+The venv **must** be created with `--system-site-packages`. Without
+it, the venv can't see the base image's already-correctly-patched,
+sm_121-compatible torch/xformers — so installing any torch-dependent
+custom-node requirement (e.g. `diffusers`, `accelerate`) silently pulls
+a fresh, generic, sm_121-incompatible torch wheel from PyPI instead of
+reusing the one already baked into the image.
+
+Dependency-install markers are stored *inside* the venv
+(`$PKG_VENV/.deps_installed_markers/`), not next to each node's
+`requirements.txt`. This was a deliberate fix after a real incident:
+manually deleting and recreating the venv (e.g. while troubleshooting
+the `--system-site-packages` issue above) does **not** delete markers
+that live elsewhere — a node's marker can end up claiming "already
+installed" against a venv that never actually got that package,
+silently breaking it. Keeping markers inside the venv means they can
+never drift out of sync with it.
 </details>
 
 <details>
@@ -171,15 +266,20 @@ ignored, for certain models.
 ## Known limitations
 
 - `ComfyUI-DGXSparkSafetensorsLoader` (a zero-copy loader that would
-  fix the same double-memory issue our mmap patch addresses) is
-  currently incompatible with mixed-precision-quantized checkpoints —
-  it loads quantization metadata onto the GPU, but the reading code
-  requires it on CPU. Not needed here since the mmap patch already
-  covers the memory issue for standard loading.
-- ComfyUI-Manager may show `Revision: UNKNOWN` in its UI — cosmetic,
-  caused by `custom_nodes` being a symlink into the persistent mount
-  rather than a plain Git working directory. Does not affect
-  functionality.
+  fix the same double-memory issue our mmap patch addresses) loads
+  without errors, but its compatibility with mixed-precision-quantized
+  checkpoints (nvfp4 / int8-convrot, as used by e.g. MiniMax H3) is
+  unverified — the loader reads quantization metadata expecting it on
+  CPU, while quantized checkpoints may place it on GPU. Not needed
+  here since the mmap patch already covers the memory issue for
+  standard loading.
+- ComfyUI-Manager occasionally logs `[ERROR] PyTorch is not installed`
+  during its own pip operations, even though ComfyUI itself is running
+  fine on that same torch install. Cosmetic as far as we've observed —
+  everything that actually depends on torch (custom nodes, xformers,
+  SageAttention) works correctly. Likely a detection quirk of
+  Manager's `uv`-based pip backend against a `--system-site-packages`
+  venv rather than a real problem.
 
 ## Credits
 

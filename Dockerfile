@@ -50,6 +50,13 @@ RUN grep -vE '^(torch|torchaudio|torchvision)\b' /tmp/requirements-extra.txt \
 
 RUN pip install --no-cache-dir --force-reinstall comfy-kitchen==0.2.31
 
+# ---- ComfyUI-Manager (bundled via ComfyUI's own manager_requirements.txt,
+# not a custom_nodes git-clone - see PROJECT_CONTEXT.md / README design
+# decisions for why the old git-clone-into-custom_nodes method was
+# dropped. The pinned version tracks whatever COMFYUI_REF ships. ----
+RUN pip install --upgrade-strategy only-if-needed \
+        -r ${COMFYUI_PATH}/manager_requirements.txt
+
 # ---- Triton ----
 ARG INSTALL_TRITON=1
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -124,15 +131,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         python3 -c "import sageattention; print('sageattention ok')" ; \
     fi
 
-# ---- ComfyUI-Manager ----
-RUN git clone https://github.com/ltdrdata/ComfyUI-Manager.git ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager && \
-    pip install --upgrade-strategy only-if-needed -r ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager/requirements.txt
-
 # ---- custom_nodes as a symlink to the persistent mount point ----
-# ComfyUI-Manager was just cloned into
-# ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager - we move it along so
-# it already lands in the mounted /custom-nodes folder on first start
-# (instead of disappearing after the build).
+# ComfyUI ships two default files here (websocket_image_save.py,
+# example_node.py.example) - we move them along so they already land
+# in the mounted /custom-nodes folder on first start (instead of
+# disappearing after the build).
 RUN mkdir -p /custom-nodes-seed && \
     mv ${COMFYUI_PATH}/custom_nodes/* /custom-nodes-seed/ 2>/dev/null || true && \
     rmdir ${COMFYUI_PATH}/custom_nodes && \

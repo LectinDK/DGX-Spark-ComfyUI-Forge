@@ -3,11 +3,12 @@ set -euo pipefail
 
 APP=/opt/comfyui
 PY="$(command -v python3 || command -v python)"
+PKG_VENV=/data/pkgvenv
 
 # On the very first start: copy ComfyUI-Manager (baked into the image)
 # into the still-empty, persistent /custom-nodes mount.
 if [ -d /custom-nodes-seed ] && [ -z "$(ls -A /custom-nodes 2>/dev/null)" ]; then
-    echo "[entrypoint] Seeding /custom-nodes with baked-in ComfyUI-Manager..."
+    echo "[entrypoint] Seeding /custom-nodes with ComfyUI's bundled default files..."
     cp -a /custom-nodes-seed/. /custom-nodes/
 fi
 
@@ -17,13 +18,20 @@ fi
 # chown 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 chown -R 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 
-# On every new image build (new build ID), discard all markers so
-# requirements are guaranteed to be reinstalled after a rebuild.
+# On every new image build (new build ID), discard dependency-install
+# markers so requirements are guaranteed to be reinstalled after a
+# rebuild. Markers live inside $PKG_VENV/.deps_installed_markers (see
+# below) rather than next to each node's requirements.txt, so that
+# deleting/recreating the venv (e.g. a manual `rm -rf` for
+# troubleshooting) automatically invalidates them too - a leftover
+# marker from an old venv previously made the install loop skip
+# reinstalling a node's deps into a freshly recreated venv, silently
+# leaving it broken (fastsafetensors incident, 2026-08-22).
 IMAGE_BUILD_ID="$(cat /opt/image-build-id 2>/dev/null || echo unknown)"
 STAMP_FILE=/data/.last-image-build-id
 if [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE")" != "$IMAGE_BUILD_ID" ]; then
-    echo "[entrypoint] New image build detected ($IMAGE_BUILD_ID) - clearing .deps_installed markers"
-    find /custom-nodes -name ".deps_installed" -delete 2>/dev/null || true
+    echo "[entrypoint] New image build detected ($IMAGE_BUILD_ID) - clearing dependency-install markers"
+    rm -rf "$PKG_VENV/.deps_installed_markers" 2>/dev/null || true
     echo "$IMAGE_BUILD_ID" > "$STAMP_FILE"
 fi
 
@@ -60,33 +68,44 @@ comfyui:
 EOF
 fi
 
-PKG_VENV=/data/pkgvenv
 if [ ! -d "$PKG_VENV" ]; then
-    echo "[entrypoint] Creating isolated package venv..."
-    gosu 1000:1000 "$PY" -m venv "$PKG_VENV"
+    echo "[entrypoint] Creating isolated package venv (with access to base image's torch/xformers/etc.)..."
+    gosu 1000:1000 "$PY" -m venv --system-site-packages "$PKG_VENV"
 fi
 
-export PYTHONPATH="/data/python-packages${PYTHONPATH:+:$PYTHONPATH}"
+DEPS_MARKER_DIR="$PKG_VENV/.deps_installed_markers"
+mkdir -p "$DEPS_MARKER_DIR"
+chown 1000:1000 "$DEPS_MARKER_DIR"
 
 for req in /custom-nodes/*/requirements.txt; do
     if [[ -f "$req" ]]; then
-        marker="$(dirname "$req")/.deps_installed"
+        node_name="$(basename "$(dirname "$req")")"
+        marker="$DEPS_MARKER_DIR/$node_name"
         if [[ ! -f "$marker" ]]; then
             echo "[entrypoint] Installing deps from: $req"
-            gosu 1000:1000 "$PKG_VENV/bin/pip" install -q \
-                --upgrade-strategy only-if-needed -r "$req" || true
-            touch "$marker"
+            if gosu 1000:1000 "$PKG_VENV/bin/pip" install \
+                --upgrade-strategy only-if-needed -r "$req"; then
+                gosu 1000:1000 touch "$marker"
+            else
+                echo "[entrypoint] WARNING: pip install FAILED for $req - marker NOT set, will retry on next start"
+            fi
         fi
     fi
 done
 
 echo "[entrypoint] ComfyUI commit: $(cat "$APP/.commit" 2>/dev/null || echo unknown)"
-PY="$(command -v python3 || command -v python)"
-echo "[entrypoint] torch: $("$PY" -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda, "cap", torch.cuda.get_device_capability() if torch.cuda.is_available() else "n/a")')"
+echo "[entrypoint] torch (via venv interpreter): $("$PKG_VENV/bin/python3" -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda, "cap", torch.cuda.get_device_capability() if torch.cuda.is_available() else "n/a")')"
 
 cd "$APP"
-PKG_VENV_SITE="$PKG_VENV/lib/python3.12/site-packages"
-exec env HOME=/data PYTHONPATH="$PKG_VENV_SITE" gosu 1000:1000 "$PY" main.py \
+# Launch through the venv's OWN interpreter (not the base system python3
+# with a manual PYTHONPATH append). Because the venv was created with
+# --system-site-packages, it still sees the base image's torch/xformers/
+# etc. - but now ComfyUI-Manager's live pip-installs (which target
+# sys.executable) correctly land in this persistent venv instead of the
+# ephemeral system Python at /usr, and are no longer blocked by pip/uv's
+# PEP 668 "externally managed environment" protection (which only
+# applies outside of an active venv).
+exec env HOME=/data gosu 1000:1000 "$PKG_VENV/bin/python3" main.py \
     --listen 0.0.0.0 \
     --port "${COMFYUI_PORT:-8188}" \
     --output-directory /output \
