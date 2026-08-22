@@ -1,0 +1,75 @@
+services:
+  dgx-spark-comfyui-forge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE: "${BASE:-nvcr.io/nvidia/pytorch:26.07-py3}"
+        COMFYUI_REF: "${COMFYUI_REF:-v0.33.1}"
+        SAGEATTN_REF: "${SAGEATTN_REF:-main}"
+        TORCHAUDIO_REF: "${TORCHAUDIO_REF:-v2.11.0}"
+        XFORMERS_REF: "${XFORMERS_REF:-v0.0.32}"
+        MAX_JOBS: "${MAX_JOBS:-8}"
+        BUILD_XFORMERS: "${BUILD_XFORMERS:-1}"
+        BUILD_SAGE_ATTN: "${BUILD_SAGE_ATTN:-1}"
+        BUILD_TORCHAUDIO: "${BUILD_TORCHAUDIO:-1}"
+        INSTALL_TRITON: "${INSTALL_TRITON:-1}"
+
+    image: dgx-spark-comfyui-forge:cu130
+    container_name: dgx-spark-comfyui-forge
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    ports:
+      - "${COMFYUI_PORT:-8190}:8188"
+      
+    environment:
+      COMFYUI_PORT: "8188"
+      COMFYUI_EXTRA_ARGS: "${COMFYUI_EXTRA_ARGS:---use-sage-attention --disable-mmap}"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      TORCH_COMPILE_DISABLE: "1"
+      TORCHDYNAMO_DISABLE: "1"
+      CUDA_CACHE_DISABLE: "1"
+      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      CUDA_DEVICE_MAX_COPY_CONNECTIONS: "4"
+      CUDA_MODULE_LOADING: "LAZY"
+      CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"
+      OMP_NUM_THREADS: "20"
+      CUBLAS_WORKSPACE_CONFIG: ":0:0"
+
+    volumes:
+      - ${COMFYUI_HOST_PATH}:/models
+      - ${FORGE_DATA_PATH}/output:/output
+      - ${FORGE_DATA_PATH}/input:/input
+      - ${FORGE_DATA_PATH}/user:/user
+      - ${FORGE_DATA_PATH}/custom_nodes:/custom-nodes
+      - ${FORGE_DATA_PATH}/data:/data
+
+    networks:
+      - dgx_spark_forge_net
+
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8188/" ]
+      interval: 30s
+      timeout: 10s
+      start_period: 300s
+      retries: 3
+
+    restart: unless-stopped
+
+networks:
+  dgx_spark_forge_net:
+    driver: bridge

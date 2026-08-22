@@ -1,0 +1,25 @@
+diff --git a/xformers/ops/fmha/flash3.py b/xformers/ops/fmha/flash3.py
+index e9136c3..4f71cbd 100644
+--- a/xformers/ops/fmha/flash3.py
++++ b/xformers/ops/fmha/flash3.py
+@@ -102,11 +102,19 @@ def _flash_attention3_incompatible_reason() -> Optional[str]:
+ 
+ 
+ FLASH3_HAS_PAGED_ATTENTION = True
+ FLASH3_HAS_FLOAT8 = False
+ _C_flashattention3 = None
+-if importlib.util.find_spec("...flash_attn_3._C", package=__package__):
++# Respect XFORMERS_DISABLE_FLASH_ATTN at import time: if the env var is set to
++# anything other than "0", skip FA3 registration entirely even if the C extension
++# was compiled into the wheel.  This is a belt-and-braces guard; the primary
++# mechanism is the build-time flag in setup.py.
++if os.environ.get("XFORMERS_DISABLE_FLASH_ATTN", "0") != "0":
++    logger.info(
++        "Flash-Attention 3 disabled at import time via XFORMERS_DISABLE_FLASH_ATTN env var"
++    )
++elif importlib.util.find_spec("...flash_attn_3._C", package=__package__):
+     from ..._cpp_lib import _build_metadata
+     from ...flash_attn_3 import _C  # type: ignore[attr-defined]  # noqa: F401
+ 
+     if _build_metadata is not None:
+         FLASH_VERSION = _build_metadata.flash_version.lstrip("v")

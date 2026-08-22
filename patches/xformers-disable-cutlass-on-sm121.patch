@@ -1,0 +1,66 @@
+diff --git a/xformers/ops/fmha/cutlass.py b/xformers/ops/fmha/cutlass.py
+index 5e96cb1..cb8ceb1 100644
+--- a/xformers/ops/fmha/cutlass.py
++++ b/xformers/ops/fmha/cutlass.py
+@@ -168,10 +168,13 @@ class FwOp(AttentionFwOpBase):
+         else None
+     )
+     SUPPORTED_DEVICES: Set[str] = {"cuda"}
+     SUPPORTED_DTYPES: Set[torch.dtype] = {torch.float, torch.half, torch.bfloat16}
+     SUPPORTED_MAX_K = 65536
++    # The underlying aten::_efficient_attention_forward CUTLASS kernels are
++    # only built for sm60-sm100; Blackwell (sm120+) is not supported.
++    CUDA_MAXIMUM_COMPUTE_CAPABILITY: Tuple[int, int] = (12, 0)
+     SUPPORTED_ATTN_BIAS_TYPES: Iterable[Any] = (
+         type(None),
+         torch.Tensor,
+         LowerTriangularMask,
+         LowerTriangularFromBottomRightMask,
+@@ -313,10 +316,17 @@ class FwOp(AttentionFwOpBase):
+         return out, ctx
+ 
+     @classmethod
+     def not_supported_reasons(cls, d: Inputs) -> List[str]:
+         reasons = super(FwOp, cls).not_supported_reasons(d)
++        if d.device.type == "cuda":
++            device_capability = torch.cuda.get_device_capability(d.device)
++            if device_capability >= cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY:
++                reasons.append(
++                    f"requires device with capability < {cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY} "
++                    f"(got {device_capability}; CUTLASS FMHA kernels only cover sm60-sm100)"
++                )
+         matmul_alignment_mn = _minimum_gemm_alignment(d)
+         check_lastdim_alignment_stride1(reasons, "query", d.query, matmul_alignment_mn)
+         check_lastdim_alignment_stride1(reasons, "value", d.value, matmul_alignment_mn)
+         _check_bias_alignment(reasons, d.attn_bias)
+         return reasons
+@@ -333,10 +343,11 @@ class BwOp(AttentionBwOpBase):
+     )
+ 
+     SUPPORTED_DEVICES = FwOp.SUPPORTED_DEVICES
+     SUPPORTED_DTYPES = FwOp.SUPPORTED_DTYPES
+     SUPPORTED_MAX_K = FwOp.SUPPORTED_MAX_K
++    CUDA_MAXIMUM_COMPUTE_CAPABILITY = FwOp.CUDA_MAXIMUM_COMPUTE_CAPABILITY
+     SUPPORTED_ATTN_BIAS_TYPES: Iterable[Any] = (
+         type(None),
+         torch.Tensor,
+         LowerTriangularMask,
+         LowerTriangularFromBottomRightMask,
+@@ -364,10 +375,17 @@ class BwOp(AttentionBwOpBase):
+     ]
+ 
+     @classmethod
+     def not_supported_reasons(cls, d: Inputs) -> List[str]:
+         reasons = super(BwOp, cls).not_supported_reasons(d)
++        if d.device.type == "cuda":
++            device_capability = torch.cuda.get_device_capability(d.device)
++            if device_capability >= cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY:
++                reasons.append(
++                    f"requires device with capability < {cls.CUDA_MAXIMUM_COMPUTE_CAPABILITY} "
++                    f"(got {device_capability}; CUTLASS FMHA kernels only cover sm60-sm100)"
++                )
+         matmul_alignment_mn = _minimum_gemm_alignment(d)
+ 
+         check_lastdim_alignment_stride1(reasons, "query", d.query, matmul_alignment_mn)
+         check_lastdim_alignment_stride1(reasons, "key", d.key, matmul_alignment_mn)
+         check_lastdim_alignment_stride1(reasons, "value", d.value, matmul_alignment_mn)
