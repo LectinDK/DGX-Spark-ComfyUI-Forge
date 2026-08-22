@@ -19,24 +19,24 @@ ENV PIP_NO_CACHE_DIR=1 \
     HF_HOME=/data/.cache/huggingface \
     COMFYUI_PATH=/opt/comfyui
 
-# ---- ComfyUI (gepinnt) ----
+# ---- ComfyUI (pinned) ----
 ARG COMFYUI_REF=v0.33.1
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git ${COMFYUI_PATH} && \
     cd ${COMFYUI_PATH} && git checkout ${COMFYUI_REF} && \
     git rev-parse HEAD > ${COMFYUI_PATH}/.commit
 
-# ---- Doppelter Speicherverbrauch (unified memory): mmap copy=True -> copy=False ----
+# ---- Double memory usage (unified memory): mmap copy=True -> copy=False ----
 RUN python3 -c "\
 from pathlib import Path; \
 p = Path('${COMFYUI_PATH}/comfy/utils.py'); \
 t = p.read_text(); \
 old = 'tensor = tensor.to(device=device, copy=True)'; \
 new = 'tensor = tensor.to(device=device, copy=False)'; \
-assert old in t, 'Patch-Ziel nicht gefunden'; \
+assert old in t, 'patch target not found'; \
 p.write_text(t.replace(old, new)); \
-print('mmap copy=False Patch angewendet')"
+print('mmap copy=False patch applied')"
 
-# ---- ComfyUI + Extra requirements ----
+# ---- ComfyUI + extra requirements ----
 RUN grep -vE '^(torch|torchaudio|torchvision)\b' ${COMFYUI_PATH}/requirements.txt \
         > /tmp/comfyui-requirements-filtered.txt && \
     pip install --upgrade-strategy only-if-needed \
@@ -81,14 +81,14 @@ from pathlib import Path; \
 p = Path('/usr/local/lib/python3.12/dist-packages/torchaudio/_extension/utils.py'); \
 t = p.read_text(); \
 t2 = re.sub(r'def _check_cuda_version\(\):', 'def _check_cuda_version():\n    return  # patched: DGX Spark NGC toolkit/torch label mismatch is harmless', t, count=1); \
-assert t2 != t, 'Patch-Ziel nicht gefunden'; \
+assert t2 != t, 'patch target not found'; \
 p.write_text(t2); \
-print('torchaudio CUDA-Versionscheck deaktiviert')" && \
+print('torchaudio CUDA version check disabled')" && \
         cd / && rm -rf /tmp/torchaudio && \
         python3 -c "import torchaudio; print('torchaudio', torchaudio.__version__)" ; \
     fi
 
-# ---- xformers (gepatcht für sm121) ----
+# ---- xformers (patched for sm121) ----
 ARG BUILD_XFORMERS=1
 ARG XFORMERS_REF=v0.0.32
 COPY patches/xformers-disable-cutlass-on-sm121.patch /tmp/patches/xformers-disable-cutlass-on-sm121.patch
@@ -109,7 +109,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         python3 -c "import xformers, xformers.ops as xo; assert hasattr(xo, 'memory_efficient_attention'); print('xformers', xformers.__version__, 'ok')" ; \
     fi
 
-# ---- SageAttention (main-Branch für sm121-Laufzeiterkennung) ----
+# ---- SageAttention (main branch for sm121 runtime detection) ----
 ARG BUILD_SAGE_ATTN=1
 ARG SAGEATTN_REF=main
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -128,10 +128,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN git clone https://github.com/ltdrdata/ComfyUI-Manager.git ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager && \
     pip install --upgrade-strategy only-if-needed -r ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager/requirements.txt
 
-# ---- custom_nodes als Symlink auf den persistenten Mount-Punkt ----
-# ComfyUI-Manager wurde eben nach ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager
-# geklont - den verschieben wir mit, damit er beim ersten Start bereits
-# im gemounteten /custom-nodes-Ordner landet (nicht beim Build "verschwindet").
+# ---- custom_nodes as a symlink to the persistent mount point ----
+# ComfyUI-Manager was just cloned into
+# ${COMFYUI_PATH}/custom_nodes/ComfyUI-Manager - we move it along so
+# it already lands in the mounted /custom-nodes folder on first start
+# (instead of disappearing after the build).
 RUN mkdir -p /custom-nodes-seed && \
     mv ${COMFYUI_PATH}/custom_nodes/* /custom-nodes-seed/ 2>/dev/null || true && \
     rmdir ${COMFYUI_PATH}/custom_nodes && \

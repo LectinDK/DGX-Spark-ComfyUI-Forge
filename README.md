@@ -188,6 +188,13 @@ notably the xformers sm_121 patches and the overall build approach,
 both originating from
 [vroomfondel/dgxarley](https://github.com/vroomfondel/dgxarley).
 
+## A note on how this was built
+
+This project was developed collaboratively with Claude (Anthropic) —
+debugging build issues, working out the sm_121-specific workarounds,
+and drafting most of the code and docs. All design decisions and
+testing on actual DGX Spark hardware are the author's own.
+
 ## License
 
 GPL-3.0 — see [`LICENSE`](./LICENSE). The two patch files under

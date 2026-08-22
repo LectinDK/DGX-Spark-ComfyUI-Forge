@@ -4,21 +4,21 @@ set -euo pipefail
 APP=/opt/comfyui
 PY="$(command -v python3 || command -v python)"
 
-# Beim allerersten Start: ComfyUI-Manager (aus dem Image) in den
-# noch leeren, persistenten /custom-nodes-Mount kopieren.
+# On the very first start: copy ComfyUI-Manager (baked into the image)
+# into the still-empty, persistent /custom-nodes mount.
 if [ -d /custom-nodes-seed ] && [ -z "$(ls -A /custom-nodes 2>/dev/null)" ]; then
     echo "[entrypoint] Seeding /custom-nodes with baked-in ComfyUI-Manager..."
     cp -a /custom-nodes-seed/. /custom-nodes/
 fi
 
-# Alle gemounteten Ordner könnten frisch von Docker als root angelegt
-# worden sein - hier korrigieren, bevor wir zu user (1000) wechseln.
-# Bewusst NICHT rekursiv für models (kann riesig sein).
+# All mounted folders may have just been freshly created by Docker as
+# root - fix that here before we switch to user (1000).
+# Deliberately NOT recursive for models (can be huge).
 # chown 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 chown -R 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 
-# Bei jedem neuen Image-Build (neue Build-ID) alle Marker verwerfen,
-# damit Requirements nach einem Rebuild garantiert neu installiert werden.
+# On every new image build (new build ID), discard all markers so
+# requirements are guaranteed to be reinstalled after a rebuild.
 IMAGE_BUILD_ID="$(cat /opt/image-build-id 2>/dev/null || echo unknown)"
 STAMP_FILE=/data/.last-image-build-id
 if [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE")" != "$IMAGE_BUILD_ID" ]; then
