@@ -62,6 +62,11 @@ each workaround.
 - `preflight-check.sh` — catches Bash syntax errors, corrupted patch
   files, invalid `docker-compose.yml`, and Dockerfile lint issues
   *before* a 30–90 minute build starts.
+- Deliberately minimal runtime flags — every unified-memory tuning
+  flag and environment variable was benchmarked against a real
+  workload (MiniMax H3) rather than assumed; several commonly-
+  recommended settings turned out to only cost speed without helping.
+  See [design decisions](#design-decisions) below.
 
 ## Prerequisites
 
@@ -251,6 +256,49 @@ never drift out of sync with it.
 </details>
 
 <details>
+<summary><strong>Why so few runtime flags, compared to other DGX Spark ComfyUI setups?</strong></summary>
+
+Earlier versions of this project carried a much larger set of runtime
+flags and `CUDA_*` environment variables (`--disable-pinned-memory`,
+`--disable-async-offload`, `--dont-upcast-attention`, `--force-fp16`,
+`--bf16-unet`/`--bf16-vae`/`--bf16-text-enc`, plus a block of `CUDA_*`
+tuning variables including a non-standard `CUBLAS_WORKSPACE_CONFIG`
+value), inherited from another DGX Spark ComfyUI project as a
+reasonable-looking starting point.
+
+Benchmarking against a real workload (MiniMax H3 video generation)
+showed none of it helped: sampling speed stayed unchanged (~200 s/it)
+whether or not the precision flags were set, and removing the entire
+`CUDA_*` block plus the extra flags took sampling well past a native
+(non-Docker) reference install on the same hardware. The extra flags
+weren't neutral padding; several of them (particularly the `CUDA_*`
+block) were actively costing performance without contributing to VRAM
+stability, which came from `--disable-dynamic-vram` and the mmap patch
+instead.
+
+A second benchmarking round tested the remaining candidates
+(`--disable-pinned-memory`, `--dont-upcast-attention`,
+`--disable-async-offload`, `--reserve-vram`) individually and in
+combination — including a lesson worth calling out: short test runs (a
+handful of sampling steps, to save time) are unreliable for comparing
+configs. One combination looked like a clear win over a 2-step sample,
+then turned out slightly worse than the leaner baseline over a full
+10-step run — one-off overhead (kernel warmup, cuBLAS autotuning on
+first call) dominates short samples. Only full-length runs were trusted
+for the final call. Every one of those four flags ended up removed;
+none improved a full run, and `--disable-async-offload` actively hurt
+in every combination tested.
+
+Final, full-run-verified config: `--use-sage-attention --disable-mmap
+--disable-dynamic-vram` — even leaner than the first pass, with
+`--reserve-vram` also dropped. Result: 151.89 s/it average sampling
+(10/10 steps), constant 94–96% GPU utilization, stable ~88 GB VRAM
+(comfortable headroom out of 124.5 GB total, even without the reserve
+flag), and a 46:50 → 32:56 minute drop in total end-to-end generation
+time for a 15-second MiniMax H3 clip.
+</details>
+
+<details>
 <summary><strong>Why no --force-fp16 / --bf16-* flags?</strong></summary>
 
 These flags are close to a no-op — or actively risky — for checkpoints
@@ -260,7 +308,9 @@ a separate code path that reads embedded quantization metadata and
 dispatches to dedicated native ops, bypassing the generic precision
 flags entirely. This is corroborated by upstream ComfyUI issues
 reporting the flags having no measurable effect, or being outright
-ignored, for certain models.
+ignored, for certain models — and directly confirmed by our own
+benchmark: `--bf16-vae` visibly changed the VAE's dtype in the logs,
+but sampling speed was unaffected.
 </details>
 
 ## Known limitations

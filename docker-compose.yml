@@ -41,14 +41,18 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       TORCH_COMPILE_DISABLE: "1"
       TORCHDYNAMO_DISABLE: "1"
-      CUDA_CACHE_DISABLE: "1"
-      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"
-      CUDA_DEVICE_MAX_CONNECTIONS: "1"
-      CUDA_DEVICE_MAX_COPY_CONNECTIONS: "4"
+# save to use, but no real benefits. testet with minimax-h3, model loading time = 2min with and without these parameters
       CUDA_MODULE_LOADING: "LAZY"
-      CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"
       OMP_NUM_THREADS: "20"
-      CUBLAS_WORKSPACE_CONFIG: ":0:0"
+# do not use. unstable vram allocation, unstable gpu utilisation
+#      CUDA_CACHE_DISABLE: "1"
+#      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"
+#      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+#      CUDA_DEVICE_MAX_COPY_CONNECTIONS: "4"
+#      CUDA_MODULE_LOADING: "LAZY"
+#      CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"
+#      CUBLAS_WORKSPACE_CONFIG: ":0:0"
+
 
     volumes:
       - ${COMFYUI_HOST_PATH}:/models
