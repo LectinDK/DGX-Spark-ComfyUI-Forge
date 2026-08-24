@@ -330,6 +330,21 @@ but sampling speed was unaffected.
   SageAttention) works correctly. Likely a detection quirk of
   Manager's `uv`-based pip backend against a `--system-site-packages`
   venv rather than a real problem.
+- Manual VRAM cleanup (the "Free model and node cache" button, "Unload
+  Models", and the `/free` API) doesn't reliably release VRAM with
+  `--disable-dynamic-vram` set — the request completes without error
+  but frees little to nothing in practice. We traced this to
+  `comfy-aimdo` (the DynamicVRAM component) being responsible for
+  precise VRAM tracking, not just automatic offloading; disabling it
+  removes the bookkeeping that `/free` relies on. Confirmed as a
+  general ComfyUI/`comfy-aimdo` behavior on unified memory, not
+  specific to this Docker setup or its Python environment split — it
+  reproduces identically on a native (non-Docker) install with the
+  same flags. Re-enabling DynamicVRAM fixes cleanup but reintroduces
+  unbounded VRAM growth during sampling (the original problem
+  `--disable-dynamic-vram` exists to solve), so it isn't a viable
+  default. Currently the only fully reliable way to reclaim VRAM is a
+  container recreate (`docker compose down && up -d`).
 
 ## Credits
 
