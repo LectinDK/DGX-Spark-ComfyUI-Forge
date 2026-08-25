@@ -41,9 +41,10 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       TORCH_COMPILE_DISABLE: "1"
       TORCHDYNAMO_DISABLE: "1"
+      PYTORCH_ALLOC_CONF: "expandable_segments:True,garbage_collection_threshold:0.6"
 # save to use, but no real benefits. testet with minimax-h3, model loading time = 2min with and without these parameters
-      CUDA_MODULE_LOADING: "LAZY"
-      OMP_NUM_THREADS: "20"
+#      CUDA_MODULE_LOADING: "LAZY"
+#     OMP_NUM_THREADS: "20"
 # do not use. unstable vram allocation, unstable gpu utilisation
 #      CUDA_CACHE_DISABLE: "1"
 #      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"
