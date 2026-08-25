@@ -1,5 +1,11 @@
 # DGX Spark ComfyUI Forge
 
+> **Status: highly experimental.** This repo is under active, hands-on
+> tuning against one specific hardware/workflow combination (DGX Spark
+> + MiniMax H3). Defaults, flags, and patches are still changing —
+> check the [Changelog](#changelog) and [Known limitations](#known-limitations)
+> before relying on it.
+
 A Docker Compose setup for running [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
 on the **NVIDIA DGX Spark** (GB10 / Grace-Blackwell, compute capability
 sm_121), built on an NGC PyTorch base image with a patched xformers,
@@ -258,44 +264,23 @@ never drift out of sync with it.
 <details>
 <summary><strong>Why so few runtime flags, compared to other DGX Spark ComfyUI setups?</strong></summary>
 
-Earlier versions of this project carried a much larger set of runtime
-flags and `CUDA_*` environment variables (`--disable-pinned-memory`,
-`--disable-async-offload`, `--dont-upcast-attention`, `--force-fp16`,
-`--bf16-unet`/`--bf16-vae`/`--bf16-text-enc`, plus a block of `CUDA_*`
-tuning variables including a non-standard `CUBLAS_WORKSPACE_CONFIG`
-value), inherited from another DGX Spark ComfyUI project as a
-reasonable-looking starting point.
-
-Benchmarking against a real workload (MiniMax H3 video generation)
-showed none of it helped: sampling speed stayed unchanged (~200 s/it)
-whether or not the precision flags were set, and removing the entire
-`CUDA_*` block plus the extra flags took sampling well past a native
-(non-Docker) reference install on the same hardware. The extra flags
-weren't neutral padding; several of them (particularly the `CUDA_*`
-block) were actively costing performance without contributing to VRAM
+Earlier versions inherited a much larger flag/`CUDA_*`-env-var set from
+another DGX Spark ComfyUI project. Benchmarking against a real workload
+(MiniMax H3) showed none of it helped — sampling speed was unchanged
+whether or not the extra flags were set, and several of them (notably
+the `CUDA_*` block) actively cost performance without improving VRAM
 stability, which came from `--disable-dynamic-vram` and the mmap patch
-instead.
+instead. One recurring lesson from benchmarking: short test runs (a
+few sampling steps) are unreliable for comparing configs — one-off
+overhead (kernel warmup, cuBLAS autotuning) dominates them. Only
+full-length runs were trusted for the final call.
 
-A second benchmarking round tested the remaining candidates
-(`--disable-pinned-memory`, `--dont-upcast-attention`,
-`--disable-async-offload`, `--reserve-vram`) individually and in
-combination — including a lesson worth calling out: short test runs (a
-handful of sampling steps, to save time) are unreliable for comparing
-configs. One combination looked like a clear win over a 2-step sample,
-then turned out slightly worse than the leaner baseline over a full
-10-step run — one-off overhead (kernel warmup, cuBLAS autotuning on
-first call) dominates short samples. Only full-length runs were trusted
-for the final call. Every one of those four flags ended up removed;
-none improved a full run, and `--disable-async-offload` actively hurt
-in every combination tested.
-
-Final, full-run-verified config: `--use-sage-attention --disable-mmap
---disable-dynamic-vram` — even leaner than the first pass, with
-`--reserve-vram` also dropped. Result: 151.89 s/it average sampling
-(10/10 steps), constant 94–96% GPU utilization, stable ~88 GB VRAM
-(comfortable headroom out of 124.5 GB total, even without the reserve
-flag), and a 46:50 → 32:56 minute drop in total end-to-end generation
-time for a 15-second MiniMax H3 clip.
+Current config: `--use-sage-attention --disable-mmap
+--disable-dynamic-vram`. Result: ~152 s/it average sampling (10/10
+steps), constant 94–96% GPU utilization, stable ~88 GB VRAM, and a
+46:50 → 32:56 minute drop in total end-to-end generation time for a
+15-second MiniMax H3 clip — matching a native (non-Docker) reference
+install on the same hardware.
 </details>
 
 <details>
@@ -345,6 +330,27 @@ but sampling speed was unaffected.
   `--disable-dynamic-vram` exists to solve), so it isn't a viable
   default. Currently the only fully reliable way to reclaim VRAM is a
   container recreate (`docker compose down && up -d`).
+
+## Changelog
+
+Brief, dated summary of major changes — full reasoning behind each is
+in the design decisions and known limitations above.
+
+- **2026-08-25** — Investigated `comfy-aimdo`/DynamicVRAM's VRAM
+  usage vs. cleanup trade-off in depth (see Known limitations). No
+  config change adopted yet — a tuned `--vram-headroom` value lowered
+  VRAM usage but didn't generalize across workflows/resolutions, so
+  `--disable-dynamic-vram` remains the default.
+- **2026-08-23** — Major performance pass: pruned an inherited
+  `CUDA_*`/flag block that was costing speed without helping VRAM
+  stability. Total end-to-end generation time for a 15s MiniMax H3
+  clip dropped ~30% (46:50 → 32:56 min - on 1ß sampling steps,
+  including model loading, on a single run - 25min computation time ~ 150-160s/it).
+- **2026-08-22** — Migrated ComfyUI-Manager to the official pip-based
+  install method (`manager_requirements.txt` + `--enable-manager`);
+  ComfyUI now launches through its own venv's Python interpreter so
+  Manager's live installs persist correctly. Full rebuild verified
+  after a system purge; public GitHub release.
 
 ## Credits
 
