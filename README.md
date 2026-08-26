@@ -269,18 +269,54 @@ another DGX Spark ComfyUI project. Benchmarking against a real workload
 (MiniMax H3) showed none of it helped — sampling speed was unchanged
 whether or not the extra flags were set, and several of them (notably
 the `CUDA_*` block) actively cost performance without improving VRAM
-stability, which came from `--disable-dynamic-vram` and the mmap patch
-instead. One recurring lesson from benchmarking: short test runs (a
-few sampling steps) are unreliable for comparing configs — one-off
-overhead (kernel warmup, cuBLAS autotuning) dominates them. Only
-full-length runs were trusted for the final call.
+stability, which came from the mmap patch and (at the time) disabling
+DynamicVRAM instead — see the next design decision for how VRAM
+stability is achieved now, with DynamicVRAM enabled. One recurring
+lesson from benchmarking: short test runs (a few sampling steps) are
+unreliable for comparing configs — one-off overhead (kernel warmup,
+cuBLAS autotuning) dominates them. Only full-length runs were trusted
+for the final call.
 
 Current config: `--use-sage-attention --disable-mmap
---disable-dynamic-vram`. Result: ~152 s/it average sampling (10/10
-steps), constant 94–96% GPU utilization, stable ~88 GB VRAM, and a
-46:50 → 32:56 minute drop in total end-to-end generation time for a
-15-second MiniMax H3 clip — matching a native (non-Docker) reference
-install on the same hardware.
+--disable-pinned-memory` (DynamicVRAM/`comfy-aimdo` left **enabled** —
+see the next design decision for why). Result: ~154 s/it average
+sampling (10/10 steps), constant 94–96% GPU utilization, ~73–78 GB
+VRAM peak, and a 46:50 → 32:56 minute drop in total end-to-end
+generation time for a 15-second MiniMax H3 clip — matching a native
+(non-Docker) reference install on the same hardware.
+</details>
+
+<details>
+<summary><strong>Why is DynamicVRAM (comfy-aimdo) enabled, when an earlier version disabled it?</strong></summary>
+
+An earlier iteration of this project disabled DynamicVRAM
+(`--disable-dynamic-vram`) because it doesn't behave correctly on
+unified memory: it's designed around a discrete VRAM/system-RAM
+boundary that doesn't exist here, so it never triggers offloading and
+VRAM grows unbounded during sampling. That fix worked, but had a real
+cost: with DynamicVRAM disabled, ComfyUI's manual VRAM cleanup ("Free
+model and node cache", "Unload Models", the `/free` API) stopped
+working — `comfy-aimdo` is also responsible for the precise VRAM
+tracking that cleanup depends on, and disabling it removes that
+bookkeeping. The only reliable way to reclaim VRAM was a full
+container recreate.
+
+Digging into `comfy-aimdo`'s actual source (`comfy/model_management.py`,
+`comfy_aimdo/host_buffer.py`) found the real lever: `aimdo` reserves a
+pinned host-memory buffer per model, sized at up to 2× the model's
+size from a `MAX_PINNED_MEMORY` ceiling that defaults to ~90% of total
+system RAM — sensible on a discrete GPU, but on unified memory that
+"system RAM" is the same physical pool VRAM lives in. `--disable-pinned-memory`
+(an existing, official ComfyUI flag) skips that calculation entirely,
+which starves this buffer down to zero without touching DynamicVRAM's
+tracking. Result: DynamicVRAM stays enabled (cleanup works), VRAM peak
+actually drops below the old `--disable-dynamic-vram` baseline
+(~73–78 GB vs. ~88 GB), and sampling speed is unaffected. Verified
+stable across a full run and repeated warm runs (no drift). A custom
+patch to make the pinned-memory ceiling scale dynamically was
+considered and dropped — an isolated test (halving the buffer's growth
+cap) showed zero speed impact even at the old, much larger cap, so
+there was no trade-off left for a patch to actually solve.
 </details>
 
 <details>
@@ -307,45 +343,37 @@ but sampling speed was unaffected.
   unverified — the loader reads quantization metadata expecting it on
   CPU, while quantized checkpoints may place it on GPU. Not needed
   here since the mmap patch already covers the memory issue for
-  standard loading.
-- ComfyUI-Manager occasionally logs `[ERROR] PyTorch is not installed`
-  during its own pip operations, even though ComfyUI itself is running
-  fine on that same torch install. Cosmetic as far as we've observed —
-  everything that actually depends on torch (custom nodes, xformers,
-  SageAttention) works correctly. Likely a detection quirk of
-  Manager's `uv`-based pip backend against a `--system-site-packages`
-  venv rather than a real problem.
-- Manual VRAM cleanup (the "Free model and node cache" button, "Unload
-  Models", and the `/free` API) doesn't reliably release VRAM with
-  `--disable-dynamic-vram` set — the request completes without error
-  but frees little to nothing in practice. We traced this to
-  `comfy-aimdo` (the DynamicVRAM component) being responsible for
-  precise VRAM tracking, not just automatic offloading; disabling it
-  removes the bookkeeping that `/free` relies on. Confirmed as a
-  general ComfyUI/`comfy-aimdo` behavior on unified memory, not
-  specific to this Docker setup or its Python environment split — it
-  reproduces identically on a native (non-Docker) install with the
-  same flags. Re-enabling DynamicVRAM fixes cleanup but reintroduces
-  unbounded VRAM growth during sampling (the original problem
-  `--disable-dynamic-vram` exists to solve), so it isn't a viable
-  default. Currently the only fully reliable way to reclaim VRAM is a
-  container recreate (`docker compose down && up -d`).
+  standard loading. A related project (`fastsafetensors`) explicitly
+  documents that quantized models don't work with it, which is a
+  strong signal the same limitation applies here.
+- ComfyUI's built-in output gallery/asset browser doesn't reliably
+  show files from a custom `--output-directory` — confirmed as an
+  upstream ComfyUI bug (`Comfy-Org/ComfyUI#13061`, `#13078`), not
+  specific to this setup; files are verified present on disk with
+  correct permissions. Several third-party nodes
+  (`ComfyUI-Gallery`, `ComfyUI-AssetsPlus`) exist specifically to work
+  around this. Not fixed here — either install one of those, or wait
+  for the upstream fix to land in a future ComfyUI release.
 
 ## Changelog
 
 Brief, dated summary of major changes — full reasoning behind each is
 in the design decisions and known limitations above.
 
+- **2026-08-26** — Solved the VRAM-cleanup / stable-sampling trade-off:
+  `--disable-pinned-memory` with DynamicVRAM enabled gets both working
+  manual cleanup and a lower, more stable VRAM peak than the previous
+  `--disable-dynamic-vram` default, with no speed cost. New default
+  config; see design decisions above.
 - **2026-08-25** — Investigated `comfy-aimdo`/DynamicVRAM's VRAM
-  usage vs. cleanup trade-off in depth (see Known limitations). No
-  config change adopted yet — a tuned `--vram-headroom` value lowered
-  VRAM usage but didn't generalize across workflows/resolutions, so
-  `--disable-dynamic-vram` remains the default.
+  usage vs. cleanup trade-off in depth. A tuned `--vram-headroom`
+  value lowered VRAM usage but didn't generalize across workflows/
+  resolutions, so it wasn't adopted (superseded by the 08-26 fix
+  above).
 - **2026-08-23** — Major performance pass: pruned an inherited
   `CUDA_*`/flag block that was costing speed without helping VRAM
   stability. Total end-to-end generation time for a 15s MiniMax H3
-  clip dropped ~30% (46:50 → 32:56 min - on 1ß sampling steps,
-  including model loading, on a single run - 25min computation time ~ 150-160s/it).
+  clip dropped ~30% (46:50 → 32:56 min).
 - **2026-08-22** — Migrated ComfyUI-Manager to the official pip-based
   install method (`manager_requirements.txt` + `--enable-manager`);
   ComfyUI now launches through its own venv's Python interpreter so

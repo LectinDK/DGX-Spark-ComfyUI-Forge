@@ -18,6 +18,35 @@ fi
 # chown 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 chown -R 1000:1000 /output /input /user /custom-nodes /data 2>/dev/null || true
 
+# Clean up leftover .deps_installed marker files from before dependency
+# markers moved into $PKG_VENV/.deps_installed_markers/ (see Idempotenz
+# notes) - no longer read by anything, just harmless litter left behind
+# by custom nodes installed under the old scheme. Cheap to check every
+# boot; becomes a no-op once cleaned up (or on a fresh install, which
+# never creates these files in the first place).
+find /custom-nodes -maxdepth 2 -name ".deps_installed" -delete 2>/dev/null || true
+
+# Seed ComfyUI-Manager's config.ini with use_uv=False, but only if the
+# file doesn't exist yet (Manager creates it itself on first boot and
+# fills in its own additional defaults around whatever's already there
+# - it doesn't overwrite existing keys). Reason: uv's `pip list`/`pip
+# show` don't correctly enumerate packages inherited via
+# --system-site-packages (see astral-sh/uv#2500), which makes Manager
+# log a confusing (but harmless) "PyTorch is not installed" during its
+# own package checks. Plain pip respects --system-site-packages
+# correctly, so this avoids the false report entirely.
+MANAGER_CONFIG_DIR="/user/__manager"
+MANAGER_CONFIG_FILE="$MANAGER_CONFIG_DIR/config.ini"
+if [ ! -f "$MANAGER_CONFIG_FILE" ]; then
+    echo "[entrypoint] Seeding ComfyUI-Manager config.ini with use_uv=False..."
+    mkdir -p "$MANAGER_CONFIG_DIR"
+    cat > "$MANAGER_CONFIG_FILE" <<EOF
+[default]
+use_uv = False
+EOF
+    chown -R 1000:1000 "$MANAGER_CONFIG_DIR"
+fi
+
 # On every new image build (new build ID), discard dependency-install
 # markers so requirements are guaranteed to be reinstalled after a
 # rebuild. Markers live inside $PKG_VENV/.deps_installed_markers (see
@@ -97,14 +126,6 @@ echo "[entrypoint] ComfyUI commit: $(cat "$APP/.commit" 2>/dev/null || echo unkn
 echo "[entrypoint] torch (via venv interpreter): $("$PKG_VENV/bin/python3" -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda, "cap", torch.cuda.get_device_capability() if torch.cuda.is_available() else "n/a")')"
 
 cd "$APP"
-# Launch through the venv's OWN interpreter (not the base system python3
-# with a manual PYTHONPATH append). Because the venv was created with
-# --system-site-packages, it still sees the base image's torch/xformers/
-# etc. - but now ComfyUI-Manager's live pip-installs (which target
-# sys.executable) correctly land in this persistent venv instead of the
-# ephemeral system Python at /usr, and are no longer blocked by pip/uv's
-# PEP 668 "externally managed environment" protection (which only
-# applies outside of an active venv).
 exec env HOME=/data gosu 1000:1000 "$PKG_VENV/bin/python3" main.py \
     --listen 0.0.0.0 \
     --port "${COMFYUI_PORT:-8188}" \
