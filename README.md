@@ -74,6 +74,43 @@ each workaround.
   recommended settings turned out to only cost speed without helping.
   See [design decisions](#design-decisions) below.
 
+## Benchmarks & recommendations
+
+All numbers below are from the same test conditions unless noted:
+MiniMax H3, 416×736, 362 frames (15s @ 24fps + audio), DGX Spark
+(GB10, sm_121), same seed. Full methodology and reasoning behind each
+number is in [design decisions](#design-decisions) and
+`PROJECT_CONTEXT.md` (development notes, not part of this repo).
+
+### This repo's default configuration
+
+| Setup | Sampling (10 steps) | Total generation time |
+|---|---|---|
+| Naively inherited flags from another DGX Spark project (early version of this repo) | ~200 s/it | 46:50 min |
+| **This repo's current default** (`--use-sage-attention --disable-mmap --disable-pinned-memory`, DynamicVRAM enabled) | **153.83 s/it** | **32:56 min** |
+
+No further action needed for this — it's what `docker-compose.yml`/
+`.env.example` already ship.
+
+### Recommended addition: Sol-Attn custom node (manual, not baked in)
+
+| Setup | Sampling | Total generation time |
+|---|---|---|
+| Repo default (above) | 153.83 s/it (10 steps) | 32:56 min |
+| + Sol-Attn generic node | 130.14 s/it (10 steps) | 26:57 min |
+| + Sol-Attn + Turbo LoRA (4 steps) | 85–89 s/it (4 steps) | 6:36–8:11 min |
+
+**Recommendation:** install
+[Saganaki22/ComfyUI-sol-attn](https://github.com/Saganaki22/ComfyUI-sol-attn)
+through the Manager, and wire the **generic `Sol-Attn Patch` node**
+(not the MiniMax-H3-specific one — it measured over 2× slower on this
+hardware despite its zero-copy design, see below) right after your
+model loader. Optionally pair it with a 4-step Turbo/step-distillation
+LoRA for the largest combined speedup. This is a workflow-level
+change, not something this Docker image can set for you — see
+"[Optional: Sol-Attn details](#optional-faster-sampling-with-sol-attn)"
+below for the full explanation and caveats before adopting it.
+
 ## Prerequisites
 
 - NVIDIA DGX Spark (or other sm_121 / Blackwell GB10 hardware)
@@ -279,11 +316,11 @@ for the final call.
 
 Current config: `--use-sage-attention --disable-mmap
 --disable-pinned-memory` (DynamicVRAM/`comfy-aimdo` left **enabled** —
-see the next design decision for why). Result: ~154 s/it average
-sampling (10/10 steps), constant 94–96% GPU utilization, ~73–78 GB
-VRAM peak, and a 46:50 → 32:56 minute drop in total end-to-end
-generation time for a 15-second MiniMax H3 clip — matching a native
-(non-Docker) reference install on the same hardware.
+see the next design decision for why). Result: constant 94–96% GPU
+utilization and ~73–78 GB VRAM peak, matching a native (non-Docker)
+reference install on the same hardware — see
+[benchmarks & recommendations](#benchmarks--recommendations) above for
+the full timing numbers.
 </details>
 
 <details>
@@ -334,6 +371,49 @@ benchmark: `--bf16-vae` visibly changed the VAE's dtype in the logs,
 but sampling speed was unaffected.
 </details>
 
+## Optional: faster sampling with Sol-Attn
+
+[Saganaki22/ComfyUI-sol-attn](https://github.com/Saganaki22/ComfyUI-sol-attn)
+ports NVIDIA's Sol-Attn sparse-attention kernel (from the NVLabs/Sana
+research group's paper *"Accelerating Video Generation Inference via
+On-the-Fly Attention Sparsification"*) to consumer/prosumer Blackwell,
+with community-added SM121 (DGX Spark) support. It's not part of this
+Docker image or its runtime flags — it's a custom node you install
+through the Manager and wire into your workflow yourself, right after
+your model loader.
+
+**Use the generic `Sol-Attn Patch` node, not `MiniMax H3 Memory
+Efficient Sol Attention Patch`.** Counter-intuitively, the
+MiniMax-H3-specific node — designed to avoid extra q/k/v copies via
+zero-copy access to H3's packed attention layout — measured **over 2×
+slower** on this hardware than the plain, model-agnostic node, despite
+using less VRAM (161.78 s/it vs. 77.30 s/it, otherwise identical
+conditions, all 50/50 attention blocks confirmed patched on both). We
+don't have a confirmed root cause (plausibly related to per-block
+patch overhead or how strided/non-contiguous access interacts with
+unified memory), but the practical result is consistent and clear.
+The generic node lacks the H3-specific node's `sink_conditioning`
+protection for prompt adherence and audio sync, but no quality
+regression was observed across several test pairs.
+
+See [benchmarks & recommendations](#benchmarks--recommendations) above
+for the full numbers (default node settings: `tau=1.3,
+min_tokens=4096`).
+
+Works unmodified with `TORCHDYNAMO_DISABLE=1` (this repo's default,
+kept for `comfy_kitchen`/Triton sm_121a caution) — it's a hand-written
+Triton kernel, not something `torch.compile` needs to generate, so the
+two are independent.
+
+The extra jump in the last row comes from a step-distillation LoRA
+(`minimax_h3_ref2v_turbo_4step`), calibrated for **exactly 4 sampling
+steps** with the `BasicGuider` node (no CFG — `BasicGuider` has no CFG
+input by design, effectively CFG=1, one forward pass per step).
+Running it at a different step count gives unrepresentative timing and
+likely worse output — the step count in the LoRA's own filename isn't
+cosmetic. Combined with Sol-Attn, total generation time for a
+15-second clip drops from ~33 minutes to well under 10.
+
 ## Known limitations
 
 - `ComfyUI-DGXSparkSafetensorsLoader` (a zero-copy loader that would
@@ -362,6 +442,11 @@ but sampling speed was unaffected.
 Brief, dated summary of major changes — full reasoning behind each is
 in the design decisions and known limitations above.
 
+- **2026-08-27** — Added a benchmarked Sol-Attn recommendation
+  (custom node, manual workflow wiring — not a runtime flag): ~15%
+  faster sampling alone, and well under 10 minutes total generation
+  time combined with a step-distillation LoRA. See "Optional: faster
+  sampling with Sol-Attn" above.
 - **2026-08-26** — Solved the VRAM-cleanup / stable-sampling trade-off:
   `--disable-pinned-memory` with DynamicVRAM enabled gets both working
   manual cleanup and a lower, more stable VRAM peak than the previous
