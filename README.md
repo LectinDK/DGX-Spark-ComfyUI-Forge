@@ -346,11 +346,13 @@ but sampling speed was unaffected.
   standard loading. A related project (`fastsafetensors`) explicitly
   documents that quantized models don't work with it, which is a
   strong signal the same limitation applies here.
-- ComfyUI's built-in output gallery/asset browser doesn't reliably
-  show files from a custom `--output-directory` — confirmed as an
-  upstream ComfyUI bug (`Comfy-Org/ComfyUI#13061`, `#13078`), not
-  specific to this setup; files are verified present on disk with
-  correct permissions. Several third-party nodes
+- ComfyUI's built-in output gallery/asset browser loses track of
+  existing files after a container restart — confirmed as an upstream
+  ComfyUI bug (`Comfy-Org/ComfyUI#13061`, `#13078`), not specific to
+  this setup; files are verified present on disk with correct
+  permissions throughout. New outputs generated within an ongoing
+  session do show up correctly; it's specifically the view after a
+  restart that comes up empty. Several third-party nodes
   (`ComfyUI-Gallery`, `ComfyUI-AssetsPlus`) exist specifically to work
   around this. Not fixed here — either install one of those, or wait
   for the upstream fix to land in a future ComfyUI release.
